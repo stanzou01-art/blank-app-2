@@ -7,52 +7,18 @@ from datetime import datetime, timedelta
 import time
 import os
 import warnings
+import json
 
 warnings.filterwarnings('ignore')
 
 OUTPUT_DIR = 'data'
 OUTPUT_FILE = os.path.join(OUTPUT_DIR, 'signals.csv')
-SCAN_LIMIT = 1000  # 扩大到 1000 只
+PERFORMANCE_FILE = os.path.join(OUTPUT_DIR, 'performance.json')
+SCAN_LIMIT = 1000
 TURTLE_LOOKBACK = 20
 ATR_PERIOD = 14
 
-# =================生成 A 股代码列表=================
-def generate_a_stock_codes():
-    """生成 A 股代码列表（上海 + 深圳）"""
-    codes = []
-    
-    # 上海证券交易所 (600000-605999, 688000-688999 科创板)
-    for i in range(600000, 606000):
-        codes.append({'code': str(i), 'sector': '沪市'})
-    for i in range(688000, 689000):
-        codes.append({'code': str(i), 'sector': '科创板'})
-    
-    # 深圳证券交易所 (000000-003999, 002000-002999 中小板，300000-301999 创业板)
-    for i in range(0, 4000):
-        codes.append({'code': str(i).zfill(6), 'sector': '深市'})
-    for i in range(2000, 3000):
-        codes.append({'code': str(i).zfill(6), 'sector': '中小板'})
-    for i in range(300000, 302000):
-        codes.append({'code': str(i), 'sector': '创业板'})
-    
-    return codes
-
-def get_stock_list_from_yfinance():
-    """尝试从 yfinance 获取可用股票列表"""
-    # 常用 A 股代码（约 500 只活跃股票）
-    active_stocks = [
-        '600519', '600036', '601398', '601857', '600028', '000001', '000002', '000858',
-        '000651', '000333', '002415', '000725', '002594', '600887', '600104', '600276',
-        '601318', '601628', '600000', '601288', '601988', '601668', '600019', '600030',
-        '600031', '600048', '600050', '600111', '000100', '000157', '000425', '000538',
-        '000568', '000625', '000776', '000895', '002001', '002007', '002027', '002049',
-        '002142', '002230', '002236', '002304', '002714', '003816', '600036', '600104',
-    ]
-    return active_stocks
-
 def extend_stock_list(target_count):
-    """扩展股票列表到目标数量"""
-    # 基础活跃股票
     base_codes = [
         '600000', '600004', '600006', '600007', '600008', '600009', '600010', '600011',
         '600015', '600016', '600018', '600019', '600020', '600021', '600022', '600023',
@@ -140,28 +106,9 @@ def extend_stock_list(target_count):
         '000963', '000965', '000966', '000967', '000968', '000969', '000970', '000971',
         '000972', '000973', '000975', '000976', '000977', '000978', '000979', '000980',
         '000981', '000982', '000983', '000985', '000987', '000988', '000989', '000990',
-        '000993', '000995', '000996', '000997', '000998', '000999', '001201', '001202',
-        '001203', '001205', '001206', '001207', '001208', '001209', '001210', '001211',
-        '001212', '001213', '001215', '001216', '001217', '001218', '001219', '001220',
-        '001221', '001222', '001223', '001225', '001226', '001227', '001228', '001229',
-        '001230', '001231', '001232', '001233', '001234', '001235', '001236', '001237',
-        '001238', '001239', '001255', '001256', '001258', '001259', '001260', '001266',
-        '001267', '001268', '001269', '001270', '001278', '001279', '001280', '001282',
-        '001283', '001286', '001287', '001288', '001289', '001291', '001293', '001295',
-        '001296', '001298', '001299', '001300', '001301', '001302', '001303', '001305',
-        '001306', '001307', '001308', '001309', '001310', '001311', '001313', '001314',
-        '001315', '001316', '001317', '001318', '001319', '001320', '001322', '001323',
-        '001324', '001325', '001326', '001328', '001330', '001331', '001332', '001333',
-        '001335', '001336', '001337', '001338', '001339', '001348', '001349', '001350',
-        '001355', '001356', '001357', '001358', '001359', '001360', '001366', '001367',
-        '001368', '001370', '001373', '001375', '001376', '001377', '001378', '001379',
-        '001380', '001381', '001382', '001383', '001386', '001387', '001389', '001391',
+        '000993', '000995', '000996', '000997', '000998', '000999',
     ]
-    
-    # 去重
     unique_codes = list(dict.fromkeys(base_codes))
-    
-    # 如果还不够，继续生成
     if len(unique_codes) < target_count:
         for i in range(600000, 606000):
             code = str(i)
@@ -171,8 +118,6 @@ def extend_stock_list(target_count):
             code = str(i).zfill(6)
             if code not in unique_codes and len(unique_codes) < target_count:
                 unique_codes.append(code)
-    
-    # 转换为股票列表格式
     result = []
     for code in unique_codes[:target_count]:
         if code.startswith('6'):
@@ -184,10 +129,8 @@ def extend_stock_list(target_count):
         else:
             sector = '其他'
         result.append({'code': code, 'name': f'股票{code}', 'sector': sector})
-    
     return result
 
-# =================数据获取=================
 def get_yfinance_code(code):
     code = str(code).zfill(6)
     if code.startswith('6'):
@@ -210,7 +153,6 @@ def get_stock_history(code, days=90):
     except:
         return None
 
-# =================策略逻辑=================
 def get_market_prior():
     try:
         ticker = yf.Ticker("000001.SS")
@@ -229,31 +171,82 @@ def get_market_prior():
     except:
         return 0.50
 
-def calculate_likelihood(df):
-    if len(df) < TURTLE_LOOKBACK + 5:
+def calculate_likelihood(df, benchmark_df=None):
+    if len(df) < TURTLE_LOOKBACK + 20:
         return 0.0
     high_20 = df['high'].rolling(TURTLE_LOOKBACK).max().iloc[-2]
     current_close = df['close'].iloc[-1]
-    current_vol = df['volume'].iloc[-1]
-    avg_vol_20 = df['volume'].rolling(20).mean().iloc[-1]
-    if avg_vol_20 == 0 or high_20 == 0:
-        return 0.0
-    is_breakout = current_close > high_20
-    if not is_breakout:
+    if current_close <= high_20:
         return 0.0
     breakout_strength = (current_close - high_20) / high_20
-    volume_ratio = current_vol / (avg_vol_20 + 1e-6)
     strength_score = min(breakout_strength * 100, 1.0)
-    volume_score = min((volume_ratio - 1) / 2, 1.0) if volume_ratio > 1 else 0.0
-    likelihood = 0.6 * strength_score + 0.4 * volume_score
+    current_vol = df['volume'].iloc[-1]
+    avg_vol_20 = df['volume'].rolling(20).mean().iloc[-1]
+    if avg_vol_20 == 0:
+        volume_score = 0.0
+    else:
+        volume_ratio = current_vol / avg_vol_20
+        volume_score = min((volume_ratio - 1) / 2, 1.0) if volume_ratio > 1 else 0.0
+    stock_return = (df['close'].iloc[-1] - df['close'].iloc[-20]) / df['close'].iloc[-20]
+    if benchmark_df is not None and len(benchmark_df) >= 20:
+        benchmark_return = (benchmark_df['Close'].iloc[-1] - benchmark_df['Close'].iloc[-20]) / benchmark_df['Close'].iloc[-20]
+        if benchmark_return != 0:
+            relative_strength = stock_return / benchmark_return
+            rs_score = min(max(relative_strength, 0), 1.0)
+        else:
+            rs_score = 0.5
+    else:
+        rs_score = 0.5
+    if len(df) >= 30:
+        vol_recent = df['close'].iloc[-10:].std()
+        vol_previous = df['close'].iloc[-30:-10].std()
+        if vol_previous > 0:
+            vcp_ratio = vol_recent / vol_previous
+            vcp_score = min(max(1.5 - vcp_ratio, 0), 1.0)
+        else:
+            vcp_score = 0.5
+    else:
+        vcp_score = 0.5
+    ma5 = df['close'].rolling(5).mean().iloc[-1]
+    ma10 = df['close'].rolling(10).mean().iloc[-1]
+    ma20 = df['close'].rolling(20).mean().iloc[-1]
+    if ma5 > ma10 > ma20:
+        ma_score = 1.0
+    elif ma5 > ma20 and ma10 > ma20:
+        ma_score = 0.7
+    elif ma5 > ma20:
+        ma_score = 0.5
+    else:
+        ma_score = 0.3
+    current_high = df['high'].iloc[-1]
+    current_low = df['low'].iloc[-1]
+    current_open = df['open'].iloc[-1]
+    if current_open > 0:
+        amplitude = (current_high - current_low) / current_open
+        if 0.03 <= amplitude <= 0.08:
+            amp_score = 1.0
+        elif 0.02 <= amplitude < 0.03 or 0.08 < amplitude <= 0.12:
+            amp_score = 0.7
+        else:
+            amp_score = 0.4
+    else:
+        amp_score = 0.5
+    likelihood = (
+        0.40 * strength_score +
+        0.20 * volume_score +
+        0.15 * rs_score +
+        0.10 * vcp_score +
+        0.10 * ma_score +
+        0.05 * amp_score
+    )
     return likelihood
 
-def analyze_stock(code, name, sector):
+def analyze_stock(code, name, sector, benchmark_df=None):
     df = get_stock_history(code)
     if df is None:
         return None
     prior = get_market_prior()
-    likelihood = calculate_likelihood(df)
+    likelihood = calculate_likelihood(df, benchmark_df)
     if likelihood == 0:
         return None
     score = prior * likelihood
@@ -272,17 +265,46 @@ def analyze_stock(code, name, sector):
         '扫描时间': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     }
 
-# =================主流程=================
+def load_performance():
+    if os.path.exists(PERFORMANCE_FILE):
+        with open(PERFORMANCE_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    return {'weeks': []}
+
+def save_performance(perf_data):
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    with open(PERFORMANCE_FILE, 'w', encoding='utf-8') as f:
+        json.dump(perf_data, f, ensure_ascii=False, indent=2)
+
+def update_performance(signals_df):
+    perf_data = load_performance()
+    week_data = {
+        'date': datetime.now().strftime('%Y-%m-%d'),
+        'stocks': []
+    }
+    for _, row in signals_df.head(10).iterrows():
+        week_data['stocks'].append({
+            'code': row['代码'],
+            'name': row['名称'],
+            'entry_price': row['最新价'],
+            'score': row['贝叶斯置信分']
+        })
+    perf_data['weeks'].append(week_data)
+    save_performance(perf_data)
+    print(f"✅ 已保存盈亏跟踪数据，共 {len(perf_data['weeks'])} 周")
+    return perf_data
+
 def run_scan():
     print("=" * 50)
-    print("🐢 贝叶斯海龟量化选股 - 云端自动扫描")
+    print("🐢 贝叶斯海龟量化选股 - 6 因子增强版")
     print("=" * 50)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
+    print("📊 获取上证指数数据...")
+    benchmark_df = get_stock_history('000001')
     stock_pool = extend_stock_list(SCAN_LIMIT)
     print(f"✅ 准备扫描 {len(stock_pool)} 只股票")
     results = []
     success_count = 0
-    fail_count = 0
     valid_count = 0
     print(f"\n🔍 开始扫描...\n")
     start_time = time.time()
@@ -294,28 +316,26 @@ def run_scan():
             elapsed = time.time() - start_time
             eta = (elapsed / (i + 1)) * (len(stock_pool) - i - 1)
             print(f"📈 进度：{i+1}/{len(stock_pool)} - 信号：{success_count} - 有效：{valid_count} - 剩余：{eta/60:.1f}分钟")
-        res = analyze_stock(code, name, sector)
+        res = analyze_stock(code, name, sector, benchmark_df)
         if res:
             results.append(res)
             success_count += 1
-        else:
-            fail_count += 1
-        # 检查是否有数据返回（即使没有信号）
         df_test = get_stock_history(code)
         if df_test is not None:
             valid_count += 1
-        time.sleep(0.15)  # 降低延时加快扫描
+        time.sleep(0.15)
     elapsed = time.time() - start_time
     if results:
         df_result = pd.DataFrame(results)
         df_result = df_result.sort_values('贝叶斯置信分', ascending=False)
         df_result.to_csv(OUTPUT_FILE, index=False, encoding='utf-8-sig')
+        print(f"✅ 已保存 {len(results)} 个信号到 {OUTPUT_FILE}")
+        update_performance(df_result)
         print("\n" + "=" * 50)
         print(f"✅ 扫描完成！")
         print(f"⏱️  总耗时：{elapsed/60:.1f}分钟")
         print(f"📊 扫描总数：{len(stock_pool)}")
         print(f"📊 有效数据：{valid_count}")
-        print(f"📊 无数据：{len(stock_pool) - valid_count}")
         print(f"🎯 买入信号：{len(results)}")
         print(f"📈 信号率：{len(results)/valid_count*100:.2f}%")
         print("=" * 50)
