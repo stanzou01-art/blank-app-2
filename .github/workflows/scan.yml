@@ -34,7 +34,6 @@ jobs:
         git config --global user.email "github-actions[bot]@users.noreply.github.com"
         git config --global user.name "github-actions[bot]"
         
-        # 只添加存在的文件
         if [ -f data/signals.csv ]; then
           git add data/signals.csv
         fi
@@ -42,7 +41,6 @@ jobs:
           git add data/performance.json
         fi
         
-        # 如果有更改则提交
         if ! git diff --staged --quiet; then
           git commit -m "Auto update $(date +'%Y-%m-%d')"
           git push origin main
