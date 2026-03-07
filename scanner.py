@@ -18,6 +18,12 @@ SCAN_LIMIT = 1000
 TURTLE_LOOKBACK = 20
 ATR_PERIOD = 14
 
+# =================风险控制参数=================
+ATR_RISK_MULTIPLIER = 2.0      # ATR 超过 2 倍均值时触发风险
+ATR_PENALTY = 0.50             # ATR 风险惩罚 50%
+BEAR_MARKET_PENALTY = 0.30     # 熊市惩罚 30%
+DIVERGENCE_PENALTY = 0.40      # 量价背离惩罚 40%
+
 def extend_stock_list(target_count):
     base_codes = [
         '600000', '600004', '600006', '600007', '600008', '600009', '600010', '600011',
@@ -153,33 +159,101 @@ def get_stock_history(code, days=90):
     except:
         return None
 
-def get_market_prior():
+# =================风险控制 1: 大盘空头检测=================
+def get_market_condition():
+    """
+    检测大盘状态
+    返回：'bull' (牛市), 'neutral' (震荡), 'bear' (熊市)
+    """
     try:
         ticker = yf.Ticker("000001.SS")
         df = ticker.history(period="1y")
         if len(df) < 60:
-            return 0.5
+            return 'neutral', 0.5
+        
         ma20 = df['Close'].rolling(20).mean().iloc[-1]
         ma60 = df['Close'].rolling(60).mean().iloc[-1]
         current_price = df['Close'].iloc[-1]
-        if current_price > ma20 and ma20 > ma60:
-            return 0.75
-        elif current_price > ma60:
-            return 0.60
+        
+        # 熊市：价格在 60 日均线之下
+        if current_price < ma60:
+            return 'bear', 1.0 - BEAR_MARKET_PENALTY  # 削弱 30%
+        # 牛市：价格在 20 日之上且 20 日在 60 日之上
+        elif current_price > ma20 and ma20 > ma60:
+            return 'bull', 1.0
+        # 震荡
         else:
-            return 0.40
+            return 'neutral', 0.85
     except:
-        return 0.50
+        return 'neutral', 0.85
 
-def calculate_likelihood(df, benchmark_df=None):
+# =================风险控制 2: ATR 异常检测=================
+def check_atr_risk(df):
+    """
+    检测 ATR 是否异常放大
+    如果当前 ATR 超过过去 20 日 ATR 均值的 2 倍，返回 True
+    """
+    try:
+        df['tr'] = np.maximum(df['high']-df['low'], 
+                              np.maximum(abs(df['high']-df['close'].shift(1)), 
+                                         abs(df['low']-df['close'].shift(1))))
+        
+        current_atr = df['tr'].iloc[-1]
+        atr_20_mean = df['tr'].rolling(20).mean().iloc[-2]  # 用昨日之前的数据
+        
+        if atr_20_mean > 0 and current_atr > atr_20_mean * ATR_RISK_MULTIPLIER:
+            return True, current_atr, atr_20_mean
+        return False, current_atr, atr_20_mean
+    except:
+        return False, 0, 0
+
+# =================风险控制 3: 量价背离检测=================
+def check_divergence(df):
+    """
+    检测量价背离
+    情况 1: 价格上涨但成交量下降（上涨背离）
+    情况 2: 突破新高但成交量低于均量（突破背离）
+    """
+    try:
+        current_close = df['close'].iloc[-1]
+        prev_close = df['close'].iloc[-2]
+        current_vol = df['volume'].iloc[-1]
+        avg_vol_20 = df['volume'].rolling(20).mean().iloc[-1]
+        
+        # 计算 5 日价格趋势
+        price_trend = (current_close - df['close'].iloc[-5]) / df['close'].iloc[-5]
+        
+        # 计算 5 日成交量趋势
+        vol_trend = (current_vol - df['volume'].iloc[-5]) / (df['volume'].iloc[-5] + 1)
+        
+        # 量价背离：价格上涨但成交量下降
+        if price_trend > 0.05 and vol_trend < -0.2:
+            return True, 'price_up_vol_down'
+        
+        # 突破但无量：突破 20 日高点但成交量低于均量
+        high_20 = df['high'].rolling(20).max().iloc[-2]
+        if current_close > high_20 and current_vol < avg_vol_20:
+            return True, 'breakout_no_volume'
+        
+        return False, None
+    except:
+        return False, None
+
+def calculate_likelihood(df, benchmark_df=None, market_multiplier=1.0):
     if len(df) < TURTLE_LOOKBACK + 20:
-        return 0.0
+        return 0.0, {}
+    
+    risk_flags = {}
+    
+    # 1. 突破强度 (40%)
     high_20 = df['high'].rolling(TURTLE_LOOKBACK).max().iloc[-2]
     current_close = df['close'].iloc[-1]
     if current_close <= high_20:
-        return 0.0
+        return 0.0, {}
     breakout_strength = (current_close - high_20) / high_20
     strength_score = min(breakout_strength * 100, 1.0)
+    
+    # 2. 成交量 (20%)
     current_vol = df['volume'].iloc[-1]
     avg_vol_20 = df['volume'].rolling(20).mean().iloc[-1]
     if avg_vol_20 == 0:
@@ -187,6 +261,8 @@ def calculate_likelihood(df, benchmark_df=None):
     else:
         volume_ratio = current_vol / avg_vol_20
         volume_score = min((volume_ratio - 1) / 2, 1.0) if volume_ratio > 1 else 0.0
+    
+    # 3. 相对强度 (15%)
     stock_return = (df['close'].iloc[-1] - df['close'].iloc[-20]) / df['close'].iloc[-20]
     if benchmark_df is not None and len(benchmark_df) >= 20:
         benchmark_return = (benchmark_df['close'].iloc[-1] - benchmark_df['close'].iloc[-20]) / benchmark_df['close'].iloc[-20]
@@ -197,6 +273,8 @@ def calculate_likelihood(df, benchmark_df=None):
             rs_score = 0.5
     else:
         rs_score = 0.5
+    
+    # 4. 波动率收缩 (10%)
     if len(df) >= 30:
         vol_recent = df['close'].iloc[-10:].std()
         vol_previous = df['close'].iloc[-30:-10].std()
@@ -207,6 +285,8 @@ def calculate_likelihood(df, benchmark_df=None):
             vcp_score = 0.5
     else:
         vcp_score = 0.5
+    
+    # 5. 均线排列 (10%)
     ma5 = df['close'].rolling(5).mean().iloc[-1]
     ma10 = df['close'].rolling(10).mean().iloc[-1]
     ma20 = df['close'].rolling(20).mean().iloc[-1]
@@ -218,6 +298,8 @@ def calculate_likelihood(df, benchmark_df=None):
         ma_score = 0.5
     else:
         ma_score = 0.3
+    
+    # 6. 振幅 (5%)
     current_high = df['high'].iloc[-1]
     current_low = df['low'].iloc[-1]
     current_open = df['open'].iloc[-1]
@@ -231,6 +313,8 @@ def calculate_likelihood(df, benchmark_df=None):
             amp_score = 0.4
     else:
         amp_score = 0.5
+    
+    # 基础似然度
     likelihood = (
         0.40 * strength_score +
         0.20 * volume_score +
@@ -239,30 +323,59 @@ def calculate_likelihood(df, benchmark_df=None):
         0.10 * ma_score +
         0.05 * amp_score
     )
-    return likelihood
+    
+    # =================应用风险控制=================
+    
+    # 风险控制 1: ATR 异常
+    atr_risk, current_atr, atr_mean = check_atr_risk(df)
+    risk_flags['atr_risk'] = atr_risk
+    if atr_risk:
+        likelihood *= (1.0 - ATR_PENALTY)
+        risk_flags['atr_penalty'] = ATR_PENALTY
+    
+    # 风险控制 2: 量价背离
+    divergence, div_type = check_divergence(df)
+    risk_flags['divergence'] = divergence
+    risk_flags['divergence_type'] = div_type
+    if divergence:
+        likelihood *= (1.0 - DIVERGENCE_PENALTY)
+        risk_flags['divergence_penalty'] = DIVERGENCE_PENALTY
+    
+    # 风险控制 3: 大盘空头 (全局乘数)
+    risk_flags['market_multiplier'] = market_multiplier
+    likelihood *= market_multiplier
+    
+    risk_flags['final_likelihood'] = likelihood
+    
+    return likelihood, risk_flags
 
-def analyze_stock(code, name, sector, benchmark_df=None):
+def analyze_stock(code, name, sector, benchmark_df=None, market_multiplier=1.0):
     df = get_stock_history(code)
     if df is None:
         return None
-    prior = get_market_prior()
-    likelihood = calculate_likelihood(df, benchmark_df)
+    likelihood, risk_flags = calculate_likelihood(df, benchmark_df, market_multiplier)
     if likelihood == 0:
         return None
-    score = prior * likelihood
-    df['tr'] = np.maximum(df['high']-df['low'], np.maximum(abs(df['high']-df['close'].shift(1)), abs(df['low']-df['close'].shift(1))))
+    
+    # 计算 ATR
+    df['tr'] = np.maximum(df['high']-df['low'], 
+                          np.maximum(abs(df['high']-df['close'].shift(1)), 
+                                     abs(df['low']-df['close'].shift(1))))
     atr = df['tr'].rolling(ATR_PERIOD).mean().iloc[-1]
     latest_price = df['close'].iloc[-1]
     high_20 = df['high'].rolling(TURTLE_LOOKBACK).max().iloc[-2]
     if high_20 == 0:
         return None
     breakout_pct = (latest_price - high_20) / high_20 * 100
+    
     return {
         '代码': code, '名称': name, '行业': sector,
         '最新价': round(latest_price, 2), '突破幅度 (%)': round(breakout_pct, 2),
-        '贝叶斯置信分': round(score, 4), 'ATR': round(atr, 2),
+        '贝叶斯置信分': round(likelihood, 4), 'ATR': round(atr, 2),
         '数据日期': datetime.now().strftime('%Y-%m-%d'),
-        '扫描时间': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        '扫描时间': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'ATR 风险': risk_flags.get('atr_risk', False),
+        '量价背离': risk_flags.get('divergence', False)
     }
 
 def load_performance():
@@ -295,17 +408,28 @@ def update_performance(signals_df):
     return perf_data
 
 def run_scan():
-    print("=" * 50)
-    print("🐢 贝叶斯海龟量化选股 - 6 因子增强版")
-    print("=" * 50)
+    print("=" * 60)
+    print("🐢 贝叶斯海龟量化选股 - 6 因子增强版 + 风险控制")
+    print("=" * 60)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
+    
+    # 获取大盘状态
+    print("📊 检测大盘状态...")
+    market_condition, market_multiplier = get_market_condition()
+    print(f"🔴 大盘状态：{market_condition} (乘数：{market_multiplier:.2f})")
+    if market_condition == 'bear':
+        print(f"⚠️  警告：熊市行情，所有信号置信度削弱{BEAR_MARKET_PENALTY*100:.0f}%")
+    
     print("📊 获取上证指数数据...")
     benchmark_df = get_stock_history('000001')
+    
     stock_pool = extend_stock_list(SCAN_LIMIT)
     print(f"✅ 准备扫描 {len(stock_pool)} 只股票")
     results = []
     success_count = 0
     valid_count = 0
+    atr_risk_count = 0
+    divergence_count = 0
     print(f"\n🔍 开始扫描...\n")
     start_time = time.time()
     for i, stock in enumerate(stock_pool):
@@ -316,10 +440,14 @@ def run_scan():
             elapsed = time.time() - start_time
             eta = (elapsed / (i + 1)) * (len(stock_pool) - i - 1)
             print(f"📈 进度：{i+1}/{len(stock_pool)} - 信号：{success_count} - 有效：{valid_count} - 剩余：{eta/60:.1f}分钟")
-        res = analyze_stock(code, name, sector, benchmark_df)
+        res = analyze_stock(code, name, sector, benchmark_df, market_multiplier)
         if res:
             results.append(res)
             success_count += 1
+            if res.get('ATR 风险'):
+                atr_risk_count += 1
+            if res.get('量价背离'):
+                divergence_count += 1
         df_test = get_stock_history(code)
         if df_test is not None:
             valid_count += 1
@@ -331,16 +459,20 @@ def run_scan():
         df_result.to_csv(OUTPUT_FILE, index=False, encoding='utf-8-sig')
         print(f"✅ 已保存 {len(results)} 个信号到 {OUTPUT_FILE}")
         update_performance(df_result)
-        print("\n" + "=" * 50)
+        print("\n" + "=" * 60)
         print(f"✅ 扫描完成！")
         print(f"⏱️  总耗时：{elapsed/60:.1f}分钟")
         print(f"📊 扫描总数：{len(stock_pool)}")
         print(f"📊 有效数据：{valid_count}")
         print(f"🎯 买入信号：{len(results)}")
         print(f"📈 信号率：{len(results)/valid_count*100:.2f}%")
-        print("=" * 50)
+        print(f"\n⚠️  风险控制统计：")
+        print(f"   - ATR 异常警告：{atr_risk_count} 只")
+        print(f"   - 量价背离警告：{divergence_count} 只")
+        print(f"   - 大盘乘数：{market_multiplier:.2f}")
+        print("=" * 60)
         print("\n🏆 Top 5 买入信号：")
-        print(df_result.head(5)[['代码', '名称', '行业', '贝叶斯置信分', '突破幅度 (%)']].to_string(index=False))
+        print(df_result.head(5)[['代码', '名称', '行业', '贝叶斯置信分', '突破幅度 (%)', 'ATR 风险', '量价背离']].to_string(index=False))
         return True
     else:
         print("\n❌ 未发现符合策略的信号")
