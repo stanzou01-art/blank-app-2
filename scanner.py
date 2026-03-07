@@ -12,7 +12,7 @@ warnings.filterwarnings('ignore')
 
 OUTPUT_DIR = 'data'
 OUTPUT_FILE = os.path.join(OUTPUT_DIR, 'signals.csv')
-SCAN_LIMIT = 4000  # 扩大到 4000 只
+SCAN_LIMIT = 1000  # 扩大到 1000 只
 TURTLE_LOOKBACK = 20
 ATR_PERIOD = 14
 

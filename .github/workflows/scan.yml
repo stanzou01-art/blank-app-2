@@ -2,17 +2,21 @@ name: Weekly Stock Scan
 
 on:
   schedule:
-    # 每周一 UTC 1:00 运行（北京时间周一 9:00，新加坡时间周一 9:00）
     - cron: '0 1 * * 1'
-  workflow_dispatch:  # 允许手动触发
+  workflow_dispatch:
 
 jobs:
   scan:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     
     steps:
     - name: Checkout repository
       uses: actions/checkout@v3
+      with:
+        fetch-depth: 0
+        token: ${{ secrets.GITHUB_TOKEN }}
     
     - name: Set up Python
       uses: actions/setup-python@v4
@@ -20,17 +24,27 @@ jobs:
         python-version: '3.10'
     
     - name: Install dependencies
-      run: |
-        pip install -r requirements.txt
+      run: pip install -r requirements.txt
     
     - name: Run scanner
       run: python scanner.py
     
-    - name: Commit and push if changed
+    - name: Commit and push
       run: |
-        git config --local user.email "action@github.com"
-        git config --local user.name "GitHub Action"
-        git add data/signals.csv
-        git diff --quiet && git diff --staged --quiet || (git commit -m "Auto update signals $(date +%Y-%m-%d %H:%M)" && git push)
+        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+        git config --global user.name "github-actions[bot]"
+        git add data/signals.csv data/performance.json
+        if ! git diff --staged --quiet; then
+          git commit -m "Auto update $(date +'%Y-%m-%d')"
+          git push origin main
+        else
+          echo "No changes to commit"
+        fi
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: scan-results
+        path: data/
